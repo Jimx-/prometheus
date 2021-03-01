@@ -58,6 +58,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/storage/tsdb"
+	"github.com/prometheus/prometheus/tsdb/labels"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/web"
 )
@@ -623,6 +624,59 @@ func main() {
 				reloadReady.Close()
 
 				webHandler.Ready()
+
+				db := localStorage.Get()
+
+				qry := 1
+
+				fmt.Println("time,count")
+				if qry == 1 {
+					for i := 0; i < 100; i++ {
+						t1 := time.Now()
+						q, _ := db.Querier(1569888000000, 1569974400000)
+						// ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")), labels.NewEqualMatcher("hostname", "host_1"))
+						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"))
+						count := 0
+						for ss.Next() {
+							ss.At().Labels()
+							count += 1
+						}
+						t2 := time.Now()
+						elapsed := t2.Sub(t1)
+						fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
+					}
+				} else if qry == 2 {
+					for i := 0; i < 100; i++ {
+						t1 := time.Now()
+						q, _ := db.Querier(1569888000000, 1569974400000)
+						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")))
+						count := 0
+						for ss.Next() {
+							ss.At().Labels()
+							count += 1
+						}
+						t2 := time.Now()
+						elapsed := t2.Sub(t1)
+						fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
+					}
+				} else if qry == 3 {
+					for i := 0; i < 100; i++ {
+						t1 := time.Now()
+						q, _ := db.Querier(1569888000000, 1569974400000)
+						rm, _ := labels.NewRegexpMatcher("hostname", "host_1...$")
+						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")), rm)
+						count := 0
+						for ss.Next() {
+							ss.At().Labels()
+							count += 1
+						}
+						t2 := time.Now()
+						elapsed := t2.Sub(t1)
+						fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
+					}
+				}
+
+				os.Exit(0)
 				level.Info(logger).Log("msg", "Server is ready to receive web requests.")
 				<-cancel
 				return nil
@@ -684,6 +738,7 @@ func main() {
 
 				startTimeMargin := int64(2 * time.Duration(cfg.tsdb.MinBlockDuration).Seconds() * 1000)
 				localStorage.Set(db, startTimeMargin)
+
 				close(dbOpen)
 				<-cancel
 				return nil

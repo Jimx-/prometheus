@@ -180,22 +180,23 @@ func NewBlockQuerier(b BlockReader, mint, maxt int64) (Querier, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "open index reader")
 	}
-	chunkr, err := b.Chunks()
-	if err != nil {
-		indexr.Close()
-		return nil, errors.Wrapf(err, "open chunk reader")
-	}
+	// chunkr, err := b.Chunks()
+	// if err != nil {
+	//	indexr.Close()
+	//	return nil, errors.Wrapf(err, "open chunk reader")
+	// }
 	tombsr, err := b.Tombstones()
 	if err != nil {
 		indexr.Close()
-		chunkr.Close()
+		// chunkr.Close()
 		return nil, errors.Wrapf(err, "open tombstone reader")
 	}
 	return &blockQuerier{
-		mint:       mint,
-		maxt:       maxt,
-		index:      indexr,
-		chunks:     chunkr,
+		mint:  mint,
+		maxt:  maxt,
+		index: indexr,
+		// chunks: chunkr,
+		chunks:     nil,
 		tombstones: tombsr,
 	}, nil
 }
@@ -798,7 +799,9 @@ func (s *populatedChunkSeries) Next() bool {
 				break
 			}
 
-			c.Chunk, s.err = s.chunks.Chunk(c.Ref)
+			// c.Chunk, s.err = s.chunks.Chunk(c.Ref)
+			c.Chunk = nil
+
 			if s.err != nil {
 				// This means that the chunk has be garbage collected. Remove it from the list.
 				if s.err == ErrNotFound {

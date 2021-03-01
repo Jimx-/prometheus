@@ -308,11 +308,11 @@ func OpenBlock(logger log.Logger, dir string, pool chunkenc.Pool) (pb *Block, er
 		return nil, err
 	}
 
-	cr, err := chunks.NewDirReader(chunkDir(dir), pool)
-	if err != nil {
-		return nil, err
-	}
-	closers = append(closers, cr)
+	// cr, err := chunks.NewDirReader(chunkDir(dir), pool)
+	// if err != nil {
+	//	return nil, err
+	// }
+	// closers = append(closers, cr)
 
 	ir, err := index.NewFileReader(filepath.Join(dir, indexFilename))
 	if err != nil {
@@ -327,14 +327,16 @@ func OpenBlock(logger log.Logger, dir string, pool chunkenc.Pool) (pb *Block, er
 	closers = append(closers, tr)
 
 	pb = &Block{
-		dir:               dir,
-		meta:              *meta,
-		chunkr:            cr,
-		indexr:            ir,
-		tombstones:        tr,
-		symbolTableSize:   ir.SymbolTableSize(),
-		logger:            logger,
-		numBytesChunks:    cr.Size(),
+		dir:  dir,
+		meta: *meta,
+		// chunkr: cr,
+		chunkr:          nil,
+		indexr:          ir,
+		tombstones:      tr,
+		symbolTableSize: ir.SymbolTableSize(),
+		logger:          logger,
+		// numBytesChunks:  cr.Size(),
+		numBytesChunks:    0,
 		numBytesIndex:     ir.Size(),
 		numBytesTombstone: sizeTomb,
 		numBytesMeta:      sizeMeta,

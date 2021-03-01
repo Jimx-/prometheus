@@ -378,6 +378,7 @@ func (h *Head) loadWAL(r *wal.Reader, multiRef map[uint64]uint64) (err error) {
 		switch dec.Type(rec) {
 		case RecordSeries:
 			series, err = dec.Series(rec, series)
+
 			if err != nil {
 				return &wal.CorruptionErr{
 					Err:     errors.Wrap(err, "decode series"),
@@ -401,6 +402,7 @@ func (h *Head) loadWAL(r *wal.Reader, multiRef map[uint64]uint64) (err error) {
 			}
 		case RecordSamples:
 			samples, err = dec.Samples(rec, samples)
+
 			s := samples
 			if err != nil {
 				return &wal.CorruptionErr{
