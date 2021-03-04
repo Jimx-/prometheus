@@ -645,7 +645,7 @@ func main() {
 						fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
 					}
 				} else if qry == 2 {
-					for i := 0; i < 100; i++ {
+					for i := 0; i < 10; i++ {
 						t1 := time.Now()
 						q, _ := db.Querier(1569888000000, 1569974400000)
 						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")))
@@ -659,7 +659,7 @@ func main() {
 						fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
 					}
 				} else if qry == 3 {
-					for i := 0; i < 100; i++ {
+					for i := 0; i < 10; i++ {
 						t1 := time.Now()
 						q, _ := db.Querier(1569888000000, 1569974400000)
 						rm, _ := labels.NewRegexpMatcher("hostname", "host_1...$")
