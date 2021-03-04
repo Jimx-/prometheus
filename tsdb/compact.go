@@ -168,6 +168,7 @@ type dirMeta struct {
 
 // Plan returns a list of compactable blocks in the provided directory.
 func (c *LeveledCompactor) Plan(dir string) ([]string, error) {
+	return nil, nil
 	dirs, err := blockDirs(dir)
 	if err != nil {
 		return nil, err

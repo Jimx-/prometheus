@@ -634,8 +634,7 @@ func main() {
 					for i := 0; i < 100; i++ {
 						t1 := time.Now()
 						q, _ := db.Querier(1569888000000, 1569974400000)
-						// ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")), labels.NewEqualMatcher("hostname", "host_1"))
-						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"))
+						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")), labels.NewEqualMatcher("hostname", "host_1"))
 						count := 0
 						for ss.Next() {
 							ss.At().Labels()
