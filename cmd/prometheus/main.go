@@ -114,6 +114,7 @@ func main() {
 		queryTimeout        model.Duration
 		queryConcurrency    int
 		queryMaxSamples     int
+		queryType           int
 		RemoteFlushDeadline model.Duration
 
 		prometheusURL   string
@@ -249,6 +250,9 @@ func main() {
 
 	a.Flag("query.max-samples", "Maximum number of samples a single query can load into memory. Note that queries will fail if they try to load more samples than this into memory, so this also limits the number of samples a query can return.").
 		Default("50000000").IntVar(&cfg.queryMaxSamples)
+
+	a.Flag("query.type", "Type of query.").
+		Default("1").IntVar(&cfg.queryType)
 
 	promlogflag.AddFlags(a, &cfg.promlogConfig)
 
@@ -627,52 +631,59 @@ func main() {
 
 				db := localStorage.Get()
 
-				qry := 1
+				qry := cfg.queryType
 
 				fmt.Println("time,count")
-				if qry == 1 {
-					for i := 0; i < 100; i++ {
-						t1 := time.Now()
-						q, _ := db.Querier(1569888000000, 1569974400000)
+				for i := 0; i < 10; i++ {
+					t1 := time.Now()
+					q, _ := db.Querier(1569888000000, 1569974400000)
+
+					count := 0
+
+					if qry == 1 {
 						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")), labels.NewEqualMatcher("hostname", "host_1"))
-						count := 0
 						for ss.Next() {
 							ss.At().Labels()
 							count += 1
 						}
-						t2 := time.Now()
-						elapsed := t2.Sub(t1)
-						fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
-					}
-				} else if qry == 2 {
-					for i := 0; i < 10; i++ {
-						t1 := time.Now()
-						q, _ := db.Querier(1569888000000, 1569974400000)
+					} else if qry == 2 {
 						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")))
-						count := 0
 						for ss.Next() {
 							ss.At().Labels()
 							count += 1
 						}
-						t2 := time.Now()
-						elapsed := t2.Sub(t1)
-						fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
-					}
-				} else if qry == 3 {
-					for i := 0; i < 10; i++ {
-						t1 := time.Now()
-						q, _ := db.Querier(1569888000000, 1569974400000)
+					} else if qry == 3 {
 						rm, _ := labels.NewRegexpMatcher("hostname", "host_1...$")
 						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")), rm)
-						count := 0
 						for ss.Next() {
 							ss.At().Labels()
 							count += 1
 						}
-						t2 := time.Now()
-						elapsed := t2.Sub(t1)
-						fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
+					} else if qry == 4 {
+						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.NewEqualMatcher("__metric__", "usage_user"), labels.NewEqualMatcher("hostname", "host_1"))
+						for ss.Next() {
+							ss.At().Labels()
+							count += 1
+						}
+					} else if qry == 5 {
+						rm, _ := labels.NewRegexpMatcher("hostname", "host_[1-8]$")
+						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")), rm)
+						for ss.Next() {
+							ss.At().Labels()
+							count += 1
+						}
+					} else if qry == 6 {
+						rm, _ := labels.NewRegexpMatcher("hostname", "host_1...$")
+						ss, _ := q.Select(labels.NewEqualMatcher("__name__", "cpu"), labels.Not(labels.NewEqualMatcher("__metric__", "usage_user")), labels.Not(rm))
+						for ss.Next() {
+							ss.At().Labels()
+							count += 1
+						}
 					}
+
+					t2 := time.Now()
+					elapsed := t2.Sub(t1)
+					fmt.Printf("%d,%d\n", elapsed.Microseconds(), count)
 				}
 
 				os.Exit(0)
