@@ -343,24 +343,24 @@ func (t *QueueManager) Stop() {
 
 // StoreSeries keeps track of which series we know about for lookups when sending samples to remote.
 func (t *QueueManager) StoreSeries(series []tsdb.RefSeries, index int) {
-	for _, s := range series {
-		ls := processExternalLabels(s.Labels, t.externalLabels)
-		rl := relabel.Process(ls, t.relabelConfigs...)
-		if len(rl) == 0 {
-			t.droppedSeries[s.Ref] = struct{}{}
-			continue
-		}
-		t.seriesSegmentIndexes[s.Ref] = index
-		labels := labelsToLabelsProto(rl)
+	// for _, s := range series {
+	//	ls := processExternalLabels(s.Labels, t.externalLabels)
+	//	rl := relabel.Process(ls, t.relabelConfigs...)
+	//	if len(rl) == 0 {
+	//		t.droppedSeries[s.Ref] = struct{}{}
+	//		continue
+	//	}
+	//	t.seriesSegmentIndexes[s.Ref] = index
+	//	labels := labelsToLabelsProto(rl)
 
-		// We should not ever be replacing a series labels in the map, but just
-		// in case we do we need to ensure we do not leak the replaced interned
-		// strings.
-		if orig, ok := t.seriesLabels[s.Ref]; ok {
-			release(orig)
-		}
-		t.seriesLabels[s.Ref] = labels
-	}
+	//	// We should not ever be replacing a series labels in the map, but just
+	//	// in case we do we need to ensure we do not leak the replaced interned
+	//	// strings.
+	//	if orig, ok := t.seriesLabels[s.Ref]; ok {
+	//		release(orig)
+	//	}
+	//	t.seriesLabels[s.Ref] = labels
+	// }
 }
 
 // SeriesReset is used when reading a checkpoint. WAL Watcher should have

@@ -27,6 +27,8 @@ import (
 
 const sep = '\xff'
 
+type Tsid uint64
+
 // Label is a key/value pair of strings.
 type Label struct {
 	Name, Value string

@@ -16,7 +16,6 @@ package tsdb
 
 import (
 	"math"
-	"sort"
 
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/tsdb/encoding"
@@ -65,17 +64,11 @@ func (d *RecordDecoder) Series(rec []byte, series []RefSeries) ([]RefSeries, err
 	for len(dec.B) > 0 && dec.Err() == nil {
 		ref := dec.Be64()
 
-		lset := make(labels.Labels, dec.Uvarint())
-
-		for i := range lset {
-			lset[i].Name = dec.UvarintStr()
-			lset[i].Value = dec.UvarintStr()
-		}
-		sort.Sort(lset)
+		tsid := labels.Tsid(dec.Uvarint64())
 
 		series = append(series, RefSeries{
 			Ref:    ref,
-			Labels: lset,
+			Tsid: tsid,
 		})
 	}
 	if dec.Err() != nil {
@@ -131,7 +124,7 @@ func (d *RecordDecoder) Tombstones(rec []byte, tstones []Stone) ([]Stone, error)
 	}
 	for dec.Len() > 0 && dec.Err() == nil {
 		tstones = append(tstones, Stone{
-			ref: dec.Be64(),
+			tsid: labels.Tsid(dec.Be64()),
 			intervals: Intervals{
 				{Mint: dec.Varint64(), Maxt: dec.Varint64()},
 			},
@@ -158,12 +151,7 @@ func (e *RecordEncoder) Series(series []RefSeries, b []byte) []byte {
 
 	for _, s := range series {
 		buf.PutBE64(s.Ref)
-		buf.PutUvarint(len(s.Labels))
-
-		for _, l := range s.Labels {
-			buf.PutUvarintStr(l.Name)
-			buf.PutUvarintStr(l.Value)
-		}
+		buf.PutUvarint64(uint64(s.Tsid))
 	}
 	return buf.Get()
 }
@@ -199,7 +187,7 @@ func (e *RecordEncoder) Tombstones(tstones []Stone, b []byte) []byte {
 
 	for _, s := range tstones {
 		for _, iv := range s.intervals {
-			buf.PutBE64(s.ref)
+			buf.PutBE64(uint64(s.tsid))
 			buf.PutVarint64(iv.Mint)
 			buf.PutVarint64(iv.Maxt)
 		}

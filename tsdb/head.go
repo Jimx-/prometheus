@@ -30,7 +30,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
-	"github.com/prometheus/prometheus/tsdb/encoding"
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/prometheus/prometheus/tsdb/labels"
 	"github.com/prometheus/prometheus/tsdb/wal"
@@ -386,7 +385,7 @@ func (h *Head) loadWAL(r *wal.Reader, multiRef map[uint64]uint64) (err error) {
 				}
 			}
 			for _, s := range series {
-				series, created := h.getOrCreateWithID(s.Ref, s.Labels.Hash(), s.Labels)
+				series, created := h.getOrCreateWithID(labels.Tsid(s.Ref))
 
 				if !created {
 					// There's already a different ref for this series.
@@ -454,11 +453,11 @@ func (h *Head) loadWAL(r *wal.Reader, multiRef map[uint64]uint64) (err error) {
 					if itv.Maxt < h.minValidTime {
 						continue
 					}
-					if m := h.series.getByID(s.ref); m == nil {
+					if m := h.series.getByID(uint64(s.tsid)); m == nil {
 						unknownRefs++
 						continue
 					}
-					allStones.addInterval(s.ref, itv)
+					allStones.addInterval(s.tsid, itv)
 				}
 			}
 		default:
@@ -482,8 +481,8 @@ func (h *Head) loadWAL(r *wal.Reader, multiRef map[uint64]uint64) (err error) {
 		return errors.Wrap(r.Err(), "read records")
 	}
 
-	if err := allStones.Iter(func(ref uint64, dranges Intervals) error {
-		return h.chunkRewrite(ref, dranges)
+	if err := allStones.Iter(func(tsid labels.Tsid, dranges Intervals) error {
+		return h.chunkRewrite(uint64(tsid), dranges)
 	}); err != nil {
 		return errors.Wrap(r.Err(), "deleting samples from tombstones")
 	}
@@ -723,18 +722,18 @@ func (h *rangeHead) Meta() BlockMeta {
 // initAppender is a helper to initialize the time bounds of the head
 // upon the first sample it receives.
 type initAppender struct {
-	app  Appender
+	app  RawAppender
 	head *Head
 }
 
-func (a *initAppender) Add(lset labels.Labels, t int64, v float64) (uint64, error) {
+func (a *initAppender) Add(id labels.Tsid, t int64, v float64) (uint64, error) {
 	if a.app != nil {
-		return a.app.Add(lset, t, v)
+		return a.app.Add(id, t, v)
 	}
 	a.head.initTime(t)
 	a.app = a.head.appender()
 
-	return a.app.Add(lset, t, v)
+	return a.app.Add(id, t, v)
 }
 
 func (a *initAppender) AddFast(ref uint64, t int64, v float64) error {
@@ -759,7 +758,7 @@ func (a *initAppender) Rollback() error {
 }
 
 // Appender returns a new Appender on the database.
-func (h *Head) Appender() Appender {
+func (h *Head) Appender() RawAppender {
 	h.metrics.activeAppenders.Inc()
 
 	// The head cache might not have a starting point yet. The init appender
@@ -824,19 +823,16 @@ type headAppender struct {
 	samples []RefSample
 }
 
-func (a *headAppender) Add(lset labels.Labels, t int64, v float64) (uint64, error) {
+func (a *headAppender) Add(tsid labels.Tsid, t int64, v float64) (uint64, error) {
 	if t < a.minValidTime {
 		return 0, ErrOutOfBounds
 	}
 
-	// Ensure no empty labels have gotten through.
-	lset = lset.WithoutEmpty()
-
-	s, created := a.head.getOrCreate(lset.Hash(), lset)
+	s, created := a.head.getOrCreate(tsid)
 	if created {
 		a.series = append(a.series, RefSeries{
 			Ref:    s.ref,
-			Labels: lset,
+			Tsid: tsid,
 		})
 	}
 	return s.ref, a.AddFast(s.ref, t, v)
@@ -953,39 +949,29 @@ func (a *headAppender) Rollback() error {
 
 // Delete all samples in the range of [mint, maxt] for series that satisfy the given
 // label matchers.
-func (h *Head) Delete(mint, maxt int64, ms ...labels.Matcher) error {
+func (h *Head) Delete(mint, maxt int64, tsid labels.Tsid) error {
 	// Do not delete anything beyond the currently valid range.
 	mint, maxt = clampInterval(mint, maxt, h.MinTime(), h.MaxTime())
 
-	ir := h.indexRange(mint, maxt)
-
-	p, err := PostingsForMatchers(ir, ms...)
-	if err != nil {
-		return errors.Wrap(err, "select series")
-	}
-
 	var stones []Stone
 	dirty := false
-	for p.Next() {
-		series := h.series.getByID(p.At())
 
-		t0, t1 := series.minTime(), series.maxTime()
-		if t0 == math.MinInt64 || t1 == math.MinInt64 {
-			continue
-		}
-		// Delete only until the current values and not beyond.
-		t0, t1 = clampInterval(mint, maxt, t0, t1)
-		if h.wal != nil {
-			stones = append(stones, Stone{p.At(), Intervals{{t0, t1}}})
-		}
-		if err := h.chunkRewrite(p.At(), Intervals{{t0, t1}}); err != nil {
-			return errors.Wrap(err, "delete samples")
-		}
-		dirty = true
+	series := h.series.getByID(uint64(tsid))
+
+	t0, t1 := series.minTime(), series.maxTime()
+	if t0 == math.MinInt64 || t1 == math.MinInt64 {
+		return nil
 	}
-	if p.Err() != nil {
-		return p.Err()
+	// Delete only until the current values and not beyond.
+	t0, t1 = clampInterval(mint, maxt, t0, t1)
+	if h.wal != nil {
+		stones = append(stones, Stone{tsid, Intervals{{t0, t1}}})
 	}
+	if err := h.chunkRewrite(uint64(tsid), Intervals{{t0, t1}}); err != nil {
+		return errors.Wrap(err, "delete samples")
+	}
+	dirty = true
+
 	var enc RecordEncoder
 	if h.wal != nil {
 		// Although we don't store the stones in the head
@@ -1067,33 +1053,6 @@ func (h *Head) gc() {
 		}
 		h.deletedMtx.Unlock()
 	}
-
-	// Rebuild symbols and label value indices from what is left in the postings terms.
-	symbols := make(map[string]struct{}, len(h.symbols))
-	values := make(map[string]stringset, len(h.values))
-
-	if err := h.postings.Iter(func(t labels.Label, _ index.Postings) error {
-		symbols[t.Name] = struct{}{}
-		symbols[t.Value] = struct{}{}
-
-		ss, ok := values[t.Name]
-		if !ok {
-			ss = stringset{}
-			values[t.Name] = ss
-		}
-		ss.set(t.Value)
-		return nil
-	}); err != nil {
-		// This should never happen, as the iteration function only returns nil.
-		panic(err)
-	}
-
-	h.symMtx.Lock()
-
-	h.symbols = symbols
-	h.values = values
-
-	h.symMtx.Unlock()
 }
 
 // Tombstones returns a new reader over the head's tombstones
@@ -1245,92 +1204,19 @@ func (h *headIndexReader) Close() error {
 	return nil
 }
 
-func (h *headIndexReader) Symbols() (map[string]struct{}, error) {
-	h.head.symMtx.RLock()
-	defer h.head.symMtx.RUnlock()
-
-	res := make(map[string]struct{}, len(h.head.symbols))
-
-	for s := range h.head.symbols {
-		res[s] = struct{}{}
-	}
-	return res, nil
-}
-
-// LabelValues returns the possible label values
-func (h *headIndexReader) LabelValues(names ...string) (index.StringTuples, error) {
-	if len(names) != 1 {
-		return nil, encoding.ErrInvalidSize
-	}
-
-	h.head.symMtx.RLock()
-	sl := make([]string, 0, len(h.head.values[names[0]]))
-	for s := range h.head.values[names[0]] {
-		sl = append(sl, s)
-	}
-	h.head.symMtx.RUnlock()
-	sort.Strings(sl)
-
-	return index.NewStringTuples(sl, len(names))
-}
-
-// LabelNames returns all the unique label names present in the head.
-func (h *headIndexReader) LabelNames() ([]string, error) {
-	h.head.symMtx.RLock()
-	defer h.head.symMtx.RUnlock()
-	labelNames := make([]string, 0, len(h.head.values))
-	for name := range h.head.values {
-		if name == "" {
-			continue
-		}
-		labelNames = append(labelNames, name)
-	}
-	sort.Strings(labelNames)
-	return labelNames, nil
-}
-
 // Postings returns the postings list iterator for the label pair.
-func (h *headIndexReader) Postings(name, value string) (index.Postings, error) {
-	return h.head.postings.Get(name, value), nil
-}
-
-func (h *headIndexReader) SortedPostings(p index.Postings) index.Postings {
-	series := make([]*memSeries, 0, 128)
-
-	// Fetch all the series only once.
-	for p.Next() {
-		s := h.head.series.getByID(p.At())
-		if s == nil {
-			level.Debug(h.head.logger).Log("msg", "looked up series not found")
-		} else {
-			series = append(series, s)
-		}
-	}
-	if err := p.Err(); err != nil {
-		return index.ErrPostings(errors.Wrap(err, "expand postings"))
-	}
-
-	sort.Slice(series, func(i, j int) bool {
-		return labels.Compare(series[i].lset, series[j].lset) < 0
-	})
-
-	// Convert back to list.
-	ep := make([]uint64, 0, len(series))
-	for _, p := range series {
-		ep = append(ep, p.ref)
-	}
-	return index.NewListPostings(ep)
+func (h *headIndexReader) AllPostings() (index.Postings, error) {
+	return h.head.postings.All(), nil
 }
 
 // Series returns the series for the given reference.
-func (h *headIndexReader) Series(ref uint64, lbls *labels.Labels, chks *[]chunks.Meta) error {
-	s := h.head.series.getByID(ref)
+func (h *headIndexReader) Series(tsid labels.Tsid, chks *[]chunks.Meta) error {
+	s := h.head.series.getByID(uint64(tsid))
 
 	if s == nil {
 		h.head.metrics.seriesNotFound.Inc()
 		return ErrNotFound
 	}
-	*lbls = append((*lbls)[:0], s.lset...)
 
 	s.Lock()
 	defer s.Unlock()
@@ -1358,35 +1244,22 @@ func (h *headIndexReader) Series(ref uint64, lbls *labels.Labels, chks *[]chunks
 	return nil
 }
 
-func (h *headIndexReader) LabelIndices() ([][]string, error) {
-	h.head.symMtx.RLock()
-	defer h.head.symMtx.RUnlock()
-	res := [][]string{}
-	for s := range h.head.values {
-		res = append(res, []string{s})
-	}
-	return res, nil
-}
-
-func (h *Head) getOrCreate(hash uint64, lset labels.Labels) (*memSeries, bool) {
+func (h *Head) getOrCreate(tsid labels.Tsid) (*memSeries, bool) {
 	// Just using `getOrSet` below would be semantically sufficient, but we'd create
 	// a new series on every sample inserted via Add(), which causes allocations
 	// and makes our series IDs rather random and harder to compress in postings.
-	s := h.series.getByHash(hash, lset)
+	s := h.series.getByID(uint64(tsid))
 	if s != nil {
 		return s, false
 	}
 
-	// Optimistically assume that we are the first one to create the series.
-	id := atomic.AddUint64(&h.lastSeriesID, 1)
-
-	return h.getOrCreateWithID(id, hash, lset)
+	return h.getOrCreateWithID(tsid)
 }
 
-func (h *Head) getOrCreateWithID(id, hash uint64, lset labels.Labels) (*memSeries, bool) {
-	s := newMemSeries(lset, id, h.chunkRange)
+func (h *Head) getOrCreateWithID(tsid labels.Tsid) (*memSeries, bool) {
+	s := newMemSeries(tsid, h.chunkRange)
 
-	s, created := h.series.getOrSet(hash, s)
+	s, created := h.series.getOrSet(tsid, s)
 	if !created {
 		return s, false
 	}
@@ -1394,22 +1267,7 @@ func (h *Head) getOrCreateWithID(id, hash uint64, lset labels.Labels) (*memSerie
 	h.metrics.seriesCreated.Inc()
 	atomic.AddUint64(&h.numSeries, 1)
 
-	h.postings.Add(id, lset)
-
-	h.symMtx.Lock()
-	defer h.symMtx.Unlock()
-
-	for _, l := range lset {
-		valset, ok := h.values[l.Name]
-		if !ok {
-			valset = stringset{}
-			h.values[l.Name] = valset
-		}
-		valset.set(l.Value)
-
-		h.symbols[l.Name] = struct{}{}
-		h.symbols[l.Value] = struct{}{}
-	}
+	h.postings.Add(tsid)
 
 	return s, true
 }
@@ -1420,37 +1278,37 @@ func (h *Head) getOrCreateWithID(id, hash uint64, lset labels.Labels) (*memSerie
 // the code.
 type seriesHashmap map[uint64][]*memSeries
 
-func (m seriesHashmap) get(hash uint64, lset labels.Labels) *memSeries {
-	for _, s := range m[hash] {
-		if s.lset.Equals(lset) {
+func (m seriesHashmap) get(tsid labels.Tsid) *memSeries {
+	for _, s := range m[uint64(tsid)] {
+		if s.ref == uint64(tsid) {
 			return s
 		}
 	}
 	return nil
 }
 
-func (m seriesHashmap) set(hash uint64, s *memSeries) {
-	l := m[hash]
+func (m seriesHashmap) set(s *memSeries) {
+	l := m[s.ref]
 	for i, prev := range l {
-		if prev.lset.Equals(s.lset) {
+		if prev.ref == s.ref {
 			l[i] = s
 			return
 		}
 	}
-	m[hash] = append(l, s)
+	m[uint64(s.ref)] = append(l, s)
 }
 
-func (m seriesHashmap) del(hash uint64, lset labels.Labels) {
+func (m seriesHashmap) del(tsid labels.Tsid) {
 	var rem []*memSeries
-	for _, s := range m[hash] {
-		if !s.lset.Equals(lset) {
+	for _, s := range m[uint64(tsid)] {
+		if s.ref != uint64(tsid) {
 			rem = append(rem, s)
 		}
 	}
 	if len(rem) == 0 {
-		delete(m, hash)
+		delete(m, uint64(tsid))
 	} else {
-		m[hash] = rem
+		m[uint64(tsid)] = rem
 	}
 }
 
@@ -1499,7 +1357,7 @@ func (s *stripeSeries) gc(mint int64) (map[uint64]struct{}, int) {
 	for i := 0; i < stripeSize; i++ {
 		s.locks[i].Lock()
 
-		for hash, all := range s.hashes[i] {
+		for _, all := range s.hashes[i] {
 			for _, series := range all {
 				series.Lock()
 				rmChunks += series.truncateChunksBefore(mint)
@@ -1521,7 +1379,7 @@ func (s *stripeSeries) gc(mint int64) (map[uint64]struct{}, int) {
 				}
 
 				deleted[series.ref] = struct{}{}
-				s.hashes[i].del(hash, series.lset)
+				s.hashes[i].del(labels.Tsid(series.ref))
 				delete(s.series[j], series.ref)
 
 				if i != j {
@@ -1548,26 +1406,16 @@ func (s *stripeSeries) getByID(id uint64) *memSeries {
 	return series
 }
 
-func (s *stripeSeries) getByHash(hash uint64, lset labels.Labels) *memSeries {
-	i := hash & stripeMask
-
-	s.locks[i].RLock()
-	series := s.hashes[i].get(hash, lset)
-	s.locks[i].RUnlock()
-
-	return series
-}
-
-func (s *stripeSeries) getOrSet(hash uint64, series *memSeries) (*memSeries, bool) {
-	i := hash & stripeMask
+func (s *stripeSeries) getOrSet(tsid labels.Tsid, series *memSeries) (*memSeries, bool) {
+	i := uint64(tsid) & stripeMask
 
 	s.locks[i].Lock()
 
-	if prev := s.hashes[i].get(hash, series.lset); prev != nil {
+	if prev := s.hashes[i].get(tsid); prev != nil {
 		s.locks[i].Unlock()
 		return prev, false
 	}
-	s.hashes[i].set(hash, series)
+	s.hashes[i].set(series)
 	s.locks[i].Unlock()
 
 	i = series.ref & stripeMask
@@ -1598,7 +1446,6 @@ type memSeries struct {
 	sync.Mutex
 
 	ref          uint64
-	lset         labels.Labels
 	chunks       []*memChunk
 	headChunk    *memChunk
 	chunkRange   int64
@@ -1611,10 +1458,9 @@ type memSeries struct {
 	app chunkenc.Appender // Current appender for the chunk.
 }
 
-func newMemSeries(lset labels.Labels, id uint64, chunkRange int64) *memSeries {
+func newMemSeries(tsid labels.Tsid, chunkRange int64) *memSeries {
 	s := &memSeries{
-		lset:       lset,
-		ref:        id,
+		ref:        uint64(tsid),
 		chunkRange: chunkRange,
 		nextAt:     math.MinInt64,
 	}

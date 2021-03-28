@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb/encoding"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/prometheus/prometheus/tsdb/fileutil"
+	"github.com/prometheus/prometheus/tsdb/labels"
 )
 
 const tombstoneFilename = "tombstones"
@@ -42,10 +43,10 @@ const (
 // TombstoneReader gives access to tombstone intervals by series reference.
 type TombstoneReader interface {
 	// Get returns deletion intervals for the series with the given reference.
-	Get(ref uint64) (Intervals, error)
+	Get(tsid labels.Tsid) (Intervals, error)
 
 	// Iter calls the given function for each encountered interval.
-	Iter(func(uint64, Intervals) error) error
+	Iter(func(labels.Tsid, Intervals) error) error
 
 	// Total returns the total count of tombstones.
 	Total() uint64
@@ -88,11 +89,11 @@ func writeTombstoneFile(logger log.Logger, dir string, tr TombstoneReader) (int6
 
 	mw := io.MultiWriter(f, hash)
 
-	if err := tr.Iter(func(ref uint64, ivs Intervals) error {
+	if err := tr.Iter(func(tsid labels.Tsid, ivs Intervals) error {
 		for _, iv := range ivs {
 			buf.Reset()
 
-			buf.PutUvarint64(ref)
+			buf.PutUvarint64(uint64(tsid))
 			buf.PutVarint64(iv.Mint)
 			buf.PutVarint64(iv.Maxt)
 
@@ -129,7 +130,7 @@ func writeTombstoneFile(logger log.Logger, dir string, tr TombstoneReader) (int6
 // Stone holds the information on the posting and time-range
 // that is deleted.
 type Stone struct {
-	ref       uint64
+	tsid      labels.Tsid
 	intervals Intervals
 }
 
@@ -176,7 +177,7 @@ func readTombstones(dir string) (TombstoneReader, int64, error) {
 			return nil, 0, d.Err()
 		}
 
-		stonesMap.addInterval(k, Interval{mint, maxt})
+		stonesMap.addInterval(labels.Tsid(k), Interval{mint, maxt})
 	}
 
 	return stonesMap, int64(len(b)), nil
@@ -193,17 +194,17 @@ func newMemTombstones() *memTombstones {
 	return &memTombstones{intvlGroups: make(map[uint64]Intervals)}
 }
 
-func (t *memTombstones) Get(ref uint64) (Intervals, error) {
+func (t *memTombstones) Get(tsid labels.Tsid) (Intervals, error) {
 	t.mtx.RLock()
 	defer t.mtx.RUnlock()
-	return t.intvlGroups[ref], nil
+	return t.intvlGroups[uint64(tsid)], nil
 }
 
-func (t *memTombstones) Iter(f func(uint64, Intervals) error) error {
+func (t *memTombstones) Iter(f func(labels.Tsid, Intervals) error) error {
 	t.mtx.RLock()
 	defer t.mtx.RUnlock()
 	for ref, ivs := range t.intvlGroups {
-		if err := f(ref, ivs); err != nil {
+		if err := f(labels.Tsid(ref), ivs); err != nil {
 			return err
 		}
 	}
@@ -222,11 +223,11 @@ func (t *memTombstones) Total() uint64 {
 }
 
 // addInterval to an existing memTombstones
-func (t *memTombstones) addInterval(ref uint64, itvs ...Interval) {
+func (t *memTombstones) addInterval(tsid labels.Tsid, itvs ...Interval) {
 	t.mtx.Lock()
 	defer t.mtx.Unlock()
 	for _, itv := range itvs {
-		t.intvlGroups[ref] = t.intvlGroups[ref].add(itv)
+		t.intvlGroups[uint64(tsid)] = t.intvlGroups[uint64(tsid)].add(itv)
 	}
 }
 

@@ -16,20 +16,12 @@ package index
 import (
 	"container/heap"
 	"encoding/binary"
-	"runtime"
 	"sort"
-	"strings"
 	"sync"
 
+	"github.com/RoaringBitmap/roaring"
 	"github.com/prometheus/prometheus/tsdb/labels"
 )
-
-var allPostingsKey = labels.Label{}
-
-// AllPostingsKey returns the label key that is used to store the postings list of all existing IDs.
-func AllPostingsKey() (name, value string) {
-	return allPostingsKey.Name, allPostingsKey.Value
-}
 
 // MemPostings holds postings list for series ID per label pair. They may be written
 // to out of order.
@@ -37,14 +29,14 @@ func AllPostingsKey() (name, value string) {
 // unordered batch fills on startup.
 type MemPostings struct {
 	mtx     sync.RWMutex
-	m       map[string]map[string][]uint64
+	m       *roaring.Bitmap
 	ordered bool
 }
 
 // NewMemPostings returns a memPostings that's ready for reads and writes.
 func NewMemPostings() *MemPostings {
 	return &MemPostings{
-		m:       make(map[string]map[string][]uint64, 512),
+		m:       roaring.New(),
 		ordered: true,
 	}
 }
@@ -53,197 +45,65 @@ func NewMemPostings() *MemPostings {
 // until ensureOrder was called once.
 func NewUnorderedMemPostings() *MemPostings {
 	return &MemPostings{
-		m:       make(map[string]map[string][]uint64, 512),
+		m: roaring.New(),
 		ordered: false,
 	}
 }
 
-// SortedKeys returns a list of sorted label keys of the postings.
-func (p *MemPostings) SortedKeys() []labels.Label {
-	p.mtx.RLock()
-	keys := make([]labels.Label, 0, len(p.m))
-
-	for n, e := range p.m {
-		for v := range e {
-			keys = append(keys, labels.Label{Name: n, Value: v})
-		}
-	}
-	p.mtx.RUnlock()
-
-	sort.Slice(keys, func(i, j int) bool {
-		if d := strings.Compare(keys[i].Name, keys[j].Name); d != 0 {
-			return d < 0
-		}
-		return keys[i].Value < keys[j].Value
-	})
-	return keys
-}
-
-// Get returns a postings list for the given label pair.
-func (p *MemPostings) Get(name, value string) Postings {
-	var lp []uint64
-	p.mtx.RLock()
-	l := p.m[name]
-	if l != nil {
-		lp = l[value]
-	}
-	p.mtx.RUnlock()
-
-	if lp == nil {
-		return EmptyPostings()
-	}
-	return newListPostings(lp...)
-}
-
 // All returns a postings list over all documents ever added.
 func (p *MemPostings) All() Postings {
-	return p.Get(AllPostingsKey())
+	p.mtx.RLock()
+
+	list := []uint64{}
+
+	i := p.m.Iterator()
+	for i.HasNext() {
+		list = append(list, uint64(i.Next()))
+	}
+
+	p.mtx.RUnlock()
+
+	return NewListPostings(list)
 }
 
 // EnsureOrder ensures that all postings lists are sorted. After it returns all further
 // calls to add and addFor will insert new IDs in a sorted manner.
 func (p *MemPostings) EnsureOrder() {
-	p.mtx.Lock()
-	defer p.mtx.Unlock()
-
-	if p.ordered {
-		return
-	}
-
-	n := runtime.GOMAXPROCS(0)
-	workc := make(chan []uint64)
-
-	var wg sync.WaitGroup
-	wg.Add(n)
-
-	for i := 0; i < n; i++ {
-		go func() {
-			for l := range workc {
-				sort.Slice(l, func(i, j int) bool { return l[i] < l[j] })
-			}
-			wg.Done()
-		}()
-	}
-
-	for _, e := range p.m {
-		for _, l := range e {
-			workc <- l
-		}
-	}
-	close(workc)
-	wg.Wait()
-
-	p.ordered = true
 }
 
 // Delete removes all ids in the given map from the postings lists.
 func (p *MemPostings) Delete(deleted map[uint64]struct{}) {
-	var keys, vals []string
-
-	// Collect all keys relevant for deletion once. New keys added afterwards
-	// can by definition not be affected by any of the given deletes.
-	p.mtx.RLock()
-	for n := range p.m {
-		keys = append(keys, n)
-	}
-	p.mtx.RUnlock()
-
-	for _, n := range keys {
-		p.mtx.RLock()
-		vals = vals[:0]
-		for v := range p.m[n] {
-			vals = append(vals, v)
-		}
-		p.mtx.RUnlock()
-
-		// For each posting we first analyse whether the postings list is affected by the deletes.
-		// If yes, we actually reallocate a new postings list.
-		for _, l := range vals {
-			// Only lock for processing one postings list so we don't block reads for too long.
-			p.mtx.Lock()
-
-			found := false
-			for _, id := range p.m[n][l] {
-				if _, ok := deleted[id]; ok {
-					found = true
-					break
-				}
-			}
-			if !found {
-				p.mtx.Unlock()
-				continue
-			}
-			repl := make([]uint64, 0, len(p.m[n][l]))
-
-			for _, id := range p.m[n][l] {
-				if _, ok := deleted[id]; !ok {
-					repl = append(repl, id)
-				}
-			}
-			if len(repl) > 0 {
-				p.m[n][l] = repl
-			} else {
-				delete(p.m[n], l)
-			}
-			p.mtx.Unlock()
-		}
-		p.mtx.Lock()
-		if len(p.m[n]) == 0 {
-			delete(p.m, n)
-		}
-		p.mtx.Unlock()
-	}
-}
-
-// Iter calls f for each postings list. It aborts if f returns an error and returns it.
-func (p *MemPostings) Iter(f func(labels.Label, Postings) error) error {
-	p.mtx.RLock()
-	defer p.mtx.RUnlock()
-
-	for n, e := range p.m {
-		for v, p := range e {
-			if err := f(labels.Label{Name: n, Value: v}, newListPostings(p...)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// Add a label set to the postings index.
-func (p *MemPostings) Add(id uint64, lset labels.Labels) {
 	p.mtx.Lock()
 
-	for _, l := range lset {
-		p.addFor(id, l)
+	for id := range deleted {
+		p.m.Remove(uint32(id))
 	}
-	p.addFor(id, allPostingsKey)
 
 	p.mtx.Unlock()
 }
 
-func (p *MemPostings) addFor(id uint64, l labels.Label) {
-	nm, ok := p.m[l.Name]
-	if !ok {
-		nm = map[string][]uint64{}
-		p.m[l.Name] = nm
-	}
-	list := append(nm[l.Value], id)
-	nm[l.Value] = list
+// Iter calls f for each postings list. It aborts if f returns an error and returns it.
+func (p *MemPostings) Iter(f func(labels.Tsid) error) error {
+	p.mtx.RLock()
+	defer p.mtx.RUnlock()
 
-	if !p.ordered {
-		return
-	}
-	// There is no guarantee that no higher ID was inserted before as they may
-	// be generated independently before adding them to postings.
-	// We repair order violations on insert. The invariant is that the first n-1
-	// items in the list are already sorted.
-	for i := len(list) - 1; i >= 1; i-- {
-		if list[i] >= list[i-1] {
-			break
+	i := p.m.Iterator()
+	for i.HasNext() {
+		if err := f(labels.Tsid(i.Next())); err != nil {
+			return err
 		}
-		list[i], list[i-1] = list[i-1], list[i]
 	}
+
+	return nil
+}
+
+// Add a label set to the postings index.
+func (p *MemPostings) Add(tsid labels.Tsid) {
+	p.mtx.Lock()
+
+	p.m.Add(uint32(tsid))
+
+	p.mtx.Unlock()
 }
 
 // ExpandPostings returns the postings expanded as a slice.

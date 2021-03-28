@@ -649,7 +649,6 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 
 	var (
 		set         ChunkSeriesSet
-		allSymbols  = make(map[string]struct{}, 1<<16)
 		closers     = []io.Closer{}
 		overlapping bool
 	)
@@ -699,19 +698,10 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 		}
 		closers = append(closers, tombsr)
 
-		symbols, err := indexr.Symbols()
-		if err != nil {
-			return errors.Wrap(err, "read symbols")
-		}
-		for s := range symbols {
-			allSymbols[s] = struct{}{}
-		}
-
-		all, err := indexr.Postings(index.AllPostingsKey())
+		all, err := indexr.AllPostings()
 		if err != nil {
 			return err
 		}
-		all = indexr.SortedPostings(all)
 
 		s := newCompactionSeriesSet(indexr, chunkr, tombsr, all)
 
@@ -728,13 +718,7 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 	// We fully rebuild the postings list index from merged series.
 	var (
 		postings = index.NewMemPostings()
-		values   = map[string]stringset{}
-		i        = uint64(0)
 	)
-
-	if err := indexw.AddSymbols(allSymbols); err != nil {
-		return errors.Wrap(err, "add symbols")
-	}
 
 	delIter := &deletedIterator{}
 	for set.Next() {
@@ -744,7 +728,7 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 		default:
 		}
 
-		lset, chks, dranges := set.At() // The chunks here are not fully deleted.
+		tsid, chks, dranges := set.At() // The chunks here are not fully deleted.
 		if overlapping {
 			// If blocks are overlapping, it is possible to have unsorted chunks.
 			sort.Slice(chks, func(i, j int) bool {
@@ -820,7 +804,7 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 			return errors.Wrap(err, "write chunks")
 		}
 
-		if err := indexw.AddSeries(i, lset, mergedChks...); err != nil {
+		if err := indexw.AddSeries(tsid, mergedChks...); err != nil {
 			return errors.Wrap(err, "add series")
 		}
 
@@ -836,39 +820,12 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 			}
 		}
 
-		for _, l := range lset {
-			valset, ok := values[l.Name]
-			if !ok {
-				valset = stringset{}
-				values[l.Name] = valset
-			}
-			valset.set(l.Value)
-		}
-		postings.Add(i, lset)
-
-		i++
+		postings.Add(tsid)
 	}
 	if set.Err() != nil {
 		return errors.Wrap(set.Err(), "iterate compaction set")
 	}
 
-	s := make([]string, 0, 256)
-	for n, v := range values {
-		s = s[:0]
-
-		for x := range v {
-			s = append(s, x)
-		}
-		if err := indexw.WriteLabelIndex([]string{n}, s); err != nil {
-			return errors.Wrap(err, "write label index")
-		}
-	}
-
-	for _, l := range postings.SortedKeys() {
-		if err := indexw.WritePostings(l.Name, l.Value, postings.Get(l.Name, l.Value)); err != nil {
-			return errors.Wrap(err, "write postings")
-		}
-	}
 	return nil
 }
 
@@ -878,7 +835,7 @@ type compactionSeriesSet struct {
 	chunks     ChunkReader
 	tombstones TombstoneReader
 
-	l         labels.Labels
+	tsid         labels.Tsid
 	c         []chunks.Meta
 	intervals Intervals
 	err       error
@@ -899,13 +856,14 @@ func (c *compactionSeriesSet) Next() bool {
 	}
 	var err error
 
-	c.intervals, err = c.tombstones.Get(c.p.At())
+	c.intervals, err = c.tombstones.Get(labels.Tsid(c.p.At()))
 	if err != nil {
 		c.err = errors.Wrap(err, "get tombstones")
 		return false
 	}
 
-	if err = c.index.Series(c.p.At(), &c.l, &c.c); err != nil {
+	c.tsid = labels.Tsid(c.p.At())
+	if err = c.index.Series(c.tsid, &c.c); err != nil {
 		c.err = errors.Wrapf(err, "get series %d", c.p.At())
 		return false
 	}
@@ -942,15 +900,15 @@ func (c *compactionSeriesSet) Err() error {
 	return c.p.Err()
 }
 
-func (c *compactionSeriesSet) At() (labels.Labels, []chunks.Meta, Intervals) {
-	return c.l, c.c, c.intervals
+func (c *compactionSeriesSet) At() (labels.Tsid, []chunks.Meta, Intervals) {
+	return c.tsid, c.c, c.intervals
 }
 
 type compactionMerger struct {
 	a, b ChunkSeriesSet
 
 	aok, bok  bool
-	l         labels.Labels
+	tsid labels.Tsid
 	c         []chunks.Meta
 	intervals Intervals
 }
@@ -977,7 +935,7 @@ func (c *compactionMerger) compare() int {
 	}
 	a, _, _ := c.a.At()
 	b, _, _ := c.b.At()
-	return labels.Compare(a, b)
+	return int(int64(a) - int64(b))
 }
 
 func (c *compactionMerger) Next() bool {
@@ -986,32 +944,32 @@ func (c *compactionMerger) Next() bool {
 	}
 	// While advancing child iterators the memory used for labels and chunks
 	// may be reused. When picking a series we have to store the result.
-	var lset labels.Labels
+	var tsid labels.Tsid
 	var chks []chunks.Meta
 
 	d := c.compare()
 	if d > 0 {
-		lset, chks, c.intervals = c.b.At()
-		c.l = append(c.l[:0], lset...)
+		tsid, chks, c.intervals = c.b.At()
+		c.tsid = tsid
 		c.c = append(c.c[:0], chks...)
 
 		c.bok = c.b.Next()
 	} else if d < 0 {
-		lset, chks, c.intervals = c.a.At()
-		c.l = append(c.l[:0], lset...)
+		tsid, chks, c.intervals = c.a.At()
+		c.tsid = tsid
 		c.c = append(c.c[:0], chks...)
 
 		c.aok = c.a.Next()
 	} else {
 		// Both sets contain the current series. Chain them into a single one.
-		l, ca, ra := c.a.At()
+		id, ca, ra := c.a.At()
 		_, cb, rb := c.b.At()
 
 		for _, r := range rb {
 			ra = ra.add(r)
 		}
 
-		c.l = append(c.l[:0], l...)
+		c.tsid = id
 		c.c = append(append(c.c[:0], ca...), cb...)
 		c.intervals = ra
 
@@ -1029,6 +987,6 @@ func (c *compactionMerger) Err() error {
 	return c.b.Err()
 }
 
-func (c *compactionMerger) At() (labels.Labels, []chunks.Meta, Intervals) {
-	return c.l, c.c, c.intervals
+func (c *compactionMerger) At() (labels.Tsid, []chunks.Meta, Intervals) {
+	return c.tsid, c.c, c.intervals
 }

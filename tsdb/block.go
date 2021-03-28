@@ -37,25 +37,13 @@ import (
 // IndexWriter serializes the index for a block of series data.
 // The methods must be called in the order they are specified in.
 type IndexWriter interface {
-	// AddSymbols registers all string symbols that are encountered in series
-	// and other indices.
-	AddSymbols(sym map[string]struct{}) error
-
 	// AddSeries populates the index writer with a series and its offsets
 	// of chunks that the index can reference.
 	// Implementations may require series to be insert in increasing order by
 	// their labels.
 	// The reference numbers are used to resolve entries in postings lists that
 	// are added later.
-	AddSeries(ref uint64, l labels.Labels, chunks ...chunks.Meta) error
-
-	// WriteLabelIndex serializes an index from label names to values.
-	// The passed in values chained tuples of strings of the length of names.
-	WriteLabelIndex(names []string, values []string) error
-
-	// WritePostings writes a postings list for a single label pair.
-	// The Postings here contain refs to the series that were added.
-	WritePostings(name, value string, it index.Postings) error
+	AddSeries(tsid labels.Tsid, chunks ...chunks.Meta) error
 
 	// Close writes any finalization and closes the resources associated with
 	// the underlying writer.
@@ -64,34 +52,12 @@ type IndexWriter interface {
 
 // IndexReader provides reading access of serialized index data.
 type IndexReader interface {
-	// Symbols returns a set of string symbols that may occur in series' labels
-	// and indices.
-	Symbols() (map[string]struct{}, error)
-
-	// LabelValues returns the possible label values.
-	LabelValues(names ...string) (index.StringTuples, error)
-
-	// Postings returns the postings list iterator for the label pair.
-	// The Postings here contain the offsets to the series inside the index.
-	// Found IDs are not strictly required to point to a valid Series, e.g. during
-	// background garbage collections.
-	Postings(name, value string) (index.Postings, error)
-
-	// SortedPostings returns a postings list that is reordered to be sorted
-	// by the label set of the underlying series.
-	SortedPostings(index.Postings) index.Postings
+	AllPostings() (index.Postings, error)
 
 	// Series populates the given labels and chunk metas for the series identified
 	// by the reference.
 	// Returns ErrNotFound if the ref does not resolve to a known series.
-	Series(ref uint64, lset *labels.Labels, chks *[]chunks.Meta) error
-
-	// LabelIndices returns a list of string tuples for which a label value index exists.
-	// NOTE: This is deprecated. Use `LabelNames()` instead.
-	LabelIndices() ([][]string, error)
-
-	// LabelNames returns all the unique label names present in the index in sorted order.
-	LabelNames() ([]string, error)
+	Series(tsid labels.Tsid, chks *[]chunks.Meta) error
 
 	// Close releases the underlying resources of the reader.
 	Close() error
@@ -272,10 +238,6 @@ type Block struct {
 	dir  string
 	meta BlockMeta
 
-	// Symbol Table Size in bytes.
-	// We maintain this variable to avoid recalculation everytime.
-	symbolTableSize uint64
-
 	chunkr     ChunkReader
 	indexr     IndexReader
 	tombstones TombstoneReader
@@ -332,7 +294,6 @@ func OpenBlock(logger log.Logger, dir string, pool chunkenc.Pool) (pb *Block, er
 		chunkr:            cr,
 		indexr:            ir,
 		tombstones:        tr,
-		symbolTableSize:   ir.SymbolTableSize(),
 		logger:            logger,
 		numBytesChunks:    cr.Size(),
 		numBytesIndex:     ir.Size(),
@@ -418,11 +379,6 @@ func (pb *Block) Tombstones() (TombstoneReader, error) {
 	return blockTombstoneReader{TombstoneReader: pb.tombstones, b: pb}, nil
 }
 
-// GetSymbolTableSize returns the Symbol Table Size in the index of this block.
-func (pb *Block) GetSymbolTableSize() uint64 {
-	return pb.symbolTableSize
-}
-
 func (pb *Block) setCompactionFailed() error {
 	pb.meta.Compaction.Failed = true
 	n, err := writeMetaFile(pb.logger, pb.dir, &pb.meta)
@@ -438,42 +394,19 @@ type blockIndexReader struct {
 	b  *Block
 }
 
-func (r blockIndexReader) Symbols() (map[string]struct{}, error) {
-	s, err := r.ir.Symbols()
-	return s, errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
-}
-
-func (r blockIndexReader) LabelValues(names ...string) (index.StringTuples, error) {
-	st, err := r.ir.LabelValues(names...)
-	return st, errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
-}
-
-func (r blockIndexReader) Postings(name, value string) (index.Postings, error) {
-	p, err := r.ir.Postings(name, value)
+func (r blockIndexReader) AllPostings() (index.Postings, error) {
+	postings, err := r.ir.AllPostings()
 	if err != nil {
-		return p, errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
+		return nil, errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
 	}
-	return p, nil
+	return postings, nil
 }
 
-func (r blockIndexReader) SortedPostings(p index.Postings) index.Postings {
-	return r.ir.SortedPostings(p)
-}
-
-func (r blockIndexReader) Series(ref uint64, lset *labels.Labels, chks *[]chunks.Meta) error {
-	if err := r.ir.Series(ref, lset, chks); err != nil {
+func (r blockIndexReader) Series(tsid labels.Tsid, chks *[]chunks.Meta) error {
+	if err := r.ir.Series(tsid, chks); err != nil {
 		return errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
 	}
 	return nil
-}
-
-func (r blockIndexReader) LabelIndices() ([][]string, error) {
-	ss, err := r.ir.LabelIndices()
-	return ss, errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
-}
-
-func (r blockIndexReader) LabelNames() ([]string, error) {
-	return r.b.LabelNames()
 }
 
 func (r blockIndexReader) Close() error {
@@ -502,7 +435,7 @@ func (r blockChunkReader) Close() error {
 }
 
 // Delete matching series between mint and maxt in the block.
-func (pb *Block) Delete(mint, maxt int64, ms ...labels.Matcher) error {
+func (pb *Block) Delete(mint, maxt int64, tsid labels.Tsid) error {
 	pb.mtx.Lock()
 	defer pb.mtx.Unlock()
 
@@ -510,22 +443,14 @@ func (pb *Block) Delete(mint, maxt int64, ms ...labels.Matcher) error {
 		return ErrClosing
 	}
 
-	p, err := PostingsForMatchers(pb.indexr, ms...)
-	if err != nil {
-		return errors.Wrap(err, "select series")
-	}
-
 	ir := pb.indexr
 
 	// Choose only valid postings which have chunks in the time-range.
 	stones := newMemTombstones()
 
-	var lset labels.Labels
 	var chks []chunks.Meta
 
-Outer:
-	for p.Next() {
-		err := ir.Series(p.At(), &lset, &chks)
+		err := ir.Series(tsid, &chks)
 		if err != nil {
 			return err
 		}
@@ -534,17 +459,12 @@ Outer:
 			if chk.OverlapsClosedInterval(mint, maxt) {
 				// Delete only until the current values and not beyond.
 				tmin, tmax := clampInterval(mint, maxt, chks[0].MinTime, chks[len(chks)-1].MaxTime)
-				stones.addInterval(p.At(), Interval{tmin, tmax})
-				continue Outer
+				stones.addInterval(tsid, Interval{tmin, tmax})
+				break
 			}
 		}
-	}
 
-	if p.Err() != nil {
-		return p.Err()
-	}
-
-	err = pb.tombstones.Iter(func(id uint64, ivs Intervals) error {
+	err = pb.tombstones.Iter(func(id labels.Tsid, ivs Intervals) error {
 		for _, iv := range ivs {
 			stones.addInterval(id, iv)
 		}
@@ -574,7 +494,7 @@ Outer:
 func (pb *Block) CleanTombstones(dest string, c Compactor) (*ulid.ULID, error) {
 	numStones := 0
 
-	if err := pb.tombstones.Iter(func(id uint64, ivs Intervals) error {
+	if err := pb.tombstones.Iter(func(id labels.Tsid, ivs Intervals) error {
 		numStones += len(ivs)
 		return nil
 	}); err != nil {
@@ -638,11 +558,6 @@ func (pb *Block) OverlapsClosedInterval(mint, maxt int64) bool {
 	// The block itself is a half-open interval
 	// [pb.meta.MinTime, pb.meta.MaxTime).
 	return pb.meta.MinTime <= maxt && mint < pb.meta.MaxTime
-}
-
-// LabelNames returns all the unique label names present in the Block in sorted order.
-func (pb *Block) LabelNames() ([]string, error) {
-	return pb.indexr.LabelNames()
 }
 
 func clampInterval(a, b, mint, maxt int64) (int64, int64) {

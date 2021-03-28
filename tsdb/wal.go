@@ -23,7 +23,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"time"
 
@@ -33,8 +32,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/tsdb/encoding"
 	"github.com/prometheus/prometheus/tsdb/fileutil"
-	"github.com/prometheus/prometheus/tsdb/labels"
 	"github.com/prometheus/prometheus/tsdb/wal"
+	"github.com/prometheus/prometheus/tsdb/labels"
 )
 
 // WALEntryType indicates what data a WAL entry contains.
@@ -108,7 +107,7 @@ type WALReader interface {
 // RefSeries is the series labels with the series ID.
 type RefSeries struct {
 	Ref    uint64
-	Labels labels.Labels
+	Tsid labels.Tsid
 }
 
 // RefSample is a timestamp/value pair associated with a reference to a series.
@@ -800,12 +799,7 @@ const (
 func (w *SegmentWAL) encodeSeries(buf *encoding.Encbuf, series []RefSeries) uint8 {
 	for _, s := range series {
 		buf.PutBE64(s.Ref)
-		buf.PutUvarint(len(s.Labels))
-
-		for _, l := range s.Labels {
-			buf.PutUvarintStr(l.Name)
-			buf.PutUvarintStr(l.Value)
-		}
+		buf.PutUvarint64(uint64(s.Tsid))
 	}
 	return walSeriesSimple
 }
@@ -834,7 +828,7 @@ func (w *SegmentWAL) encodeSamples(buf *encoding.Encbuf, samples []RefSample) ui
 func (w *SegmentWAL) encodeDeletes(buf *encoding.Encbuf, stones []Stone) uint8 {
 	for _, s := range stones {
 		for _, iv := range s.intervals {
-			buf.PutBE64(s.ref)
+			buf.PutBE64(uint64(s.tsid))
 			buf.PutVarint64(iv.Mint)
 			buf.PutVarint64(iv.Maxt)
 		}
@@ -1133,18 +1127,11 @@ func (r *walReader) decodeSeries(flag byte, b []byte, res *[]RefSeries) error {
 
 	for len(dec.B) > 0 && dec.Err() == nil {
 		ref := dec.Be64()
-
-		lset := make(labels.Labels, dec.Uvarint())
-
-		for i := range lset {
-			lset[i].Name = dec.UvarintStr()
-			lset[i].Value = dec.UvarintStr()
-		}
-		sort.Sort(lset)
+		tsid := labels.Tsid(dec.Uvarint64())
 
 		*res = append(*res, RefSeries{
 			Ref:    ref,
-			Labels: lset,
+			Tsid: tsid,
 		})
 	}
 	if dec.Err() != nil {
@@ -1193,7 +1180,7 @@ func (r *walReader) decodeDeletes(flag byte, b []byte, res *[]Stone) error {
 
 	for dec.Len() > 0 && dec.Err() == nil {
 		*res = append(*res, Stone{
-			ref: dec.Be64(),
+			tsid: labels.Tsid(dec.Be64()),
 			intervals: Intervals{
 				{Mint: dec.Varint64(), Maxt: dec.Varint64()},
 			},

@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"path"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -41,6 +42,8 @@ import (
 	"github.com/prometheus/prometheus/tsdb/labels"
 	"github.com/prometheus/prometheus/tsdb/wal"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/Jimx-/tagtreego/tagtree"
 )
 
 // DefaultOptions used for the DB. They are sane for setups using
@@ -111,6 +114,27 @@ type Appender interface {
 	Rollback() error
 }
 
+type RawAppender interface {
+	// Add adds a sample pair for the given series. A reference number is
+	// returned which can be used to add further samples in the same or later
+	// transactions.
+	// Returned reference numbers are ephemeral and may be rejected in calls
+	// to AddFast() at any point. Adding the sample via Add() returns a new
+	// reference number.
+	// If the reference is 0 it must not be used for caching.
+	Add(id labels.Tsid, t int64, v float64) (uint64, error)
+
+	// AddFast adds a sample pair for the referenced series. It is generally
+	// faster than adding a sample by providing its full label set.
+	AddFast(ref uint64, t int64, v float64) error
+
+	// Commit submits the collected samples and purges the batch.
+	Commit() error
+
+	// Rollback rolls back all modifications made in the appender so far.
+	Rollback() error
+}
+
 // DB handles reads and writes of time series falling into
 // a hashed partition of a seriedb.
 type DB struct {
@@ -143,6 +167,8 @@ type DB struct {
 
 	// Cancel a running compaction when a shutdown is initiated.
 	compactCancel context.CancelFunc
+
+	index tagtree.IndexServerWrapper
 }
 
 type dbMetrics struct {
@@ -176,14 +202,7 @@ func newDBMetrics(db *DB, r prometheus.Registerer) *dbMetrics {
 		Name: "prometheus_tsdb_symbol_table_size_bytes",
 		Help: "Size of symbol table on disk (in bytes)",
 	}, func() float64 {
-		db.mtx.RLock()
-		blocks := db.blocks[:]
-		db.mtx.RUnlock()
-		symTblSize := uint64(0)
-		for _, b := range blocks {
-			symTblSize += b.GetSymbolTableSize()
-		}
-		return float64(symTblSize)
+		return float64(0.0)
 	})
 	m.reloads = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "prometheus_tsdb_reloads_total",
@@ -433,6 +452,15 @@ func Open(dir string, l log.Logger, r prometheus.Registerer, opts *Options) (db 
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		return nil, err
 	}
+	indexDir := path.Join(dir, "index")
+	seriesDir := path.Join(indexDir, "series")
+	if err := os.MkdirAll(indexDir, 0777); err != nil {
+		return nil, err
+	}
+
+	sm := tagtree.CreateSeriesFileManager(1000000, seriesDir, 50000)
+	index := tagtree.CreateIndexServer(indexDir, 4096, sm)
+
 	if l == nil {
 		l = log.NewNopLogger()
 	}
@@ -457,6 +485,7 @@ func Open(dir string, l log.Logger, r prometheus.Registerer, opts *Options) (db 
 		stopc:       make(chan struct{}),
 		autoCompact: true,
 		chunkPool:   chunkenc.NewPool(),
+		index: index,
 	}
 	db.metrics = newDBMetrics(db, r)
 
@@ -575,18 +604,35 @@ func (db *DB) run() {
 
 // Appender opens a new appender against the database.
 func (db *DB) Appender() Appender {
-	return dbAppender{db: db, Appender: db.head.Appender()}
+	return dbAppender{db: db, batch: tagtree.NewVecSeriesRef(), app: db.head.Appender()}
 }
 
 // dbAppender wraps the DB's head appender and triggers compactions on commit
 // if necessary.
 type dbAppender struct {
-	Appender
+	app RawAppender
+	batch tagtree.VecSeriesRef
 	db *DB
 }
 
+func (a dbAppender) Add(l labels.Labels, t int64, v float64) (uint64, error) {
+	p := tagtree.AddSeries(a.db.index, t, l)
+	if p.GetSecond() {
+		a.batch.Add(p.GetFirst())
+	}
+
+	return a.app.Add(labels.Tsid(p.GetFirst().Raw_tsid()), t, v)
+}
+
+func (a dbAppender) AddFast(ref uint64, t int64, v float64) error {
+	return a.app.AddFast(ref, t, v)
+}
+
 func (a dbAppender) Commit() error {
-	err := a.Appender.Commit()
+	a.db.index.CommitBatch(a.batch)
+	a.batch.Clear()
+
+	err := a.app.Commit()
 
 	// We could just run this check every few minutes practically. But for benchmarks
 	// and high frequency use cases this is the safer way.
@@ -597,6 +643,11 @@ func (a dbAppender) Commit() error {
 		}
 	}
 	return err
+}
+
+func (a dbAppender) Rollback() error {
+	a.batch.Clear()
+	return a.app.Rollback()
 }
 
 // Compact data if possible. After successful compaction blocks are reloaded
@@ -1168,7 +1219,7 @@ func (db *DB) Querier(mint, maxt int64) (Querier, error) {
 		})
 	}
 
-	blockQueriers := make([]Querier, 0, len(blocks))
+	blockQueriers := make([]RawQuerier, 0, len(blocks))
 	for _, b := range blocks {
 		q, err := NewBlockQuerier(b, mint, maxt)
 		if err == nil {
@@ -1182,17 +1233,20 @@ func (db *DB) Querier(mint, maxt int64) (Querier, error) {
 		return nil, errors.Wrapf(err, "open querier for block %s", b)
 	}
 
-	if len(OverlappingBlocks(blockMetas)) > 0 {
-		return &verticalQuerier{
-			querier: querier{
-				blocks: blockQueriers,
-			},
-		}, nil
-	}
+	// if len(OverlappingBlocks(blockMetas)) > 0 {
+	//	return &verticalQuerier{
+	//		querier: querier{
+	//			blocks: blockQueriers,
+	//		},
+	//	}, nil
+	// }
 
-	return &querier{
+	return &dbQuerier{RawQuerier: &rawQuerier{
 		blocks: blockQueriers,
-	}, nil
+	},
+		mint: mint,
+		maxt: maxt,
+		index: db.index}, nil
 }
 
 func rangeForTimestamp(t int64, width int64) (maxt int64) {
@@ -1209,15 +1263,31 @@ func (db *DB) Delete(mint, maxt int64, ms ...labels.Matcher) error {
 	db.mtx.RLock()
 	defer db.mtx.RUnlock()
 
+	postings := tagtree.ResolveLabelMatchers(db.index, mint, maxt, ms...)
+
 	for _, b := range db.blocks {
 		if b.OverlapsClosedInterval(mint, maxt) {
 			g.Go(func(b *Block) func() error {
-				return func() error { return b.Delete(mint, maxt, ms...) }
+				return func() error {
+					for _, p := range postings {
+						err := b.Delete(mint, maxt, p)
+						if err != nil {
+							return err
+						}
+					}
+					return nil
+				}
 			}(b))
 		}
 	}
 	g.Go(func() error {
-		return db.head.Delete(mint, maxt, ms...)
+		for _, p := range postings {
+			err := db.head.Delete(mint, maxt, p)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	return g.Wait()
 }
@@ -1332,4 +1402,53 @@ func exponential(d, min, max time.Duration) time.Duration {
 		d = max
 	}
 	return d
+}
+
+type dbSeries struct {
+	RawSeries
+	index tagtree.IndexServerWrapper
+}
+
+func (s *dbSeries) Labels() labels.Labels {
+	return tagtree.GetSeriesLabels(s.index, uint64(s.RawSeries.Tsid()))
+}
+
+type dbSeriesSet struct {
+	RawSeriesSet
+	index tagtree.IndexServerWrapper
+}
+
+func (s *dbSeriesSet) At() Series {
+	series := s.RawSeriesSet.At()
+	return &dbSeries{RawSeries: series, index: s.index}
+}
+
+type dbQuerier struct  {
+	RawQuerier
+	mint int64
+	maxt int64
+	index tagtree.IndexServerWrapper
+}
+
+func (q *dbQuerier) Select(ms ...labels.Matcher) (SeriesSet, error) {
+	postings := tagtree.ResolveLabelMatchers(q.index, q.mint, q.maxt, ms...)
+	inner, err := q.RawQuerier.Select(postings...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &dbSeriesSet{RawSeriesSet: inner, index: q.index}, nil
+}
+
+func (q *dbQuerier)	LabelValues(string) ([]string, error) {
+	return []string{}, nil
+}
+
+func (q *dbQuerier)	LabelValuesFor(string, labels.Label) ([]string, error) {
+	return []string{}, nil
+}
+
+func (q *dbQuerier)	LabelNames() ([]string, error) {
+	return []string{}, nil
 }
