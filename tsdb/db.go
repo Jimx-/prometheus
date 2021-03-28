@@ -43,7 +43,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb/wal"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/Jimx-/tagtreego/tagtree"
+	"github.com/Jimx-/tagtree/tagtreego"
 )
 
 // DefaultOptions used for the DB. They are sane for setups using
@@ -168,7 +168,7 @@ type DB struct {
 	// Cancel a running compaction when a shutdown is initiated.
 	compactCancel context.CancelFunc
 
-	index tagtree.IndexServerWrapper
+	index tagtreego.IndexServerWrapper
 }
 
 type dbMetrics struct {
@@ -458,8 +458,8 @@ func Open(dir string, l log.Logger, r prometheus.Registerer, opts *Options) (db 
 		return nil, err
 	}
 
-	sm := tagtree.CreateSeriesFileManager(1000000, seriesDir, 50000)
-	index := tagtree.CreateIndexServer(indexDir, 4096, sm)
+	sm := tagtreego.CreateSeriesFileManager(1000000, seriesDir, 50000)
+	index := tagtreego.CreateIndexServer(indexDir, 4096, sm)
 
 	if l == nil {
 		l = log.NewNopLogger()
@@ -604,19 +604,19 @@ func (db *DB) run() {
 
 // Appender opens a new appender against the database.
 func (db *DB) Appender() Appender {
-	return dbAppender{db: db, batch: tagtree.NewVecSeriesRef(), app: db.head.Appender()}
+	return dbAppender{db: db, batch: tagtreego.NewVecSeriesRef(), app: db.head.Appender()}
 }
 
 // dbAppender wraps the DB's head appender and triggers compactions on commit
 // if necessary.
 type dbAppender struct {
 	app RawAppender
-	batch tagtree.VecSeriesRef
+	batch tagtreego.VecSeriesRef
 	db *DB
 }
 
 func (a dbAppender) Add(l labels.Labels, t int64, v float64) (uint64, error) {
-	p := tagtree.AddSeries(a.db.index, t, l)
+	p := tagtreego.AddSeries(a.db.index, t, l)
 	if p.GetSecond() {
 		a.batch.Add(p.GetFirst())
 	}
@@ -1263,7 +1263,7 @@ func (db *DB) Delete(mint, maxt int64, ms ...labels.Matcher) error {
 	db.mtx.RLock()
 	defer db.mtx.RUnlock()
 
-	postings := tagtree.ResolveLabelMatchers(db.index, mint, maxt, ms...)
+	postings := tagtreego.ResolveLabelMatchers(db.index, mint, maxt, ms...)
 
 	for _, b := range db.blocks {
 		if b.OverlapsClosedInterval(mint, maxt) {
@@ -1406,16 +1406,16 @@ func exponential(d, min, max time.Duration) time.Duration {
 
 type dbSeries struct {
 	RawSeries
-	index tagtree.IndexServerWrapper
+	index tagtreego.IndexServerWrapper
 }
 
 func (s *dbSeries) Labels() labels.Labels {
-	return tagtree.GetSeriesLabels(s.index, uint64(s.RawSeries.Tsid()))
+	return tagtreego.GetSeriesLabels(s.index, uint64(s.RawSeries.Tsid()))
 }
 
 type dbSeriesSet struct {
 	RawSeriesSet
-	index tagtree.IndexServerWrapper
+	index tagtreego.IndexServerWrapper
 }
 
 func (s *dbSeriesSet) At() Series {
@@ -1427,11 +1427,11 @@ type dbQuerier struct  {
 	RawQuerier
 	mint int64
 	maxt int64
-	index tagtree.IndexServerWrapper
+	index tagtreego.IndexServerWrapper
 }
 
 func (q *dbQuerier) Select(ms ...labels.Matcher) (SeriesSet, error) {
-	postings := tagtree.ResolveLabelMatchers(q.index, q.mint, q.maxt, ms...)
+	postings := tagtreego.ResolveLabelMatchers(q.index, q.mint, q.maxt, ms...)
 	inner, err := q.RawQuerier.Select(postings...)
 
 	if err != nil {
