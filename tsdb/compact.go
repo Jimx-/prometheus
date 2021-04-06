@@ -728,7 +728,7 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 		default:
 		}
 
-		tsid, chks, dranges := set.At() // The chunks here are not fully deleted.
+		tsid, _, chks, dranges := set.At() // The chunks here are not fully deleted.
 		if overlapping {
 			// If blocks are overlapping, it is possible to have unsorted chunks.
 			sort.Slice(chks, func(i, j int) bool {
@@ -862,8 +862,9 @@ func (c *compactionSeriesSet) Next() bool {
 		return false
 	}
 
+	var lbls labels.Labels
 	c.tsid = labels.Tsid(c.p.At())
-	if err = c.index.Series(c.tsid, &c.c); err != nil {
+	if err = c.index.Series(c.tsid, &lbls, &c.c); err != nil {
 		c.err = errors.Wrapf(err, "get series %d", c.p.At())
 		return false
 	}
@@ -900,8 +901,8 @@ func (c *compactionSeriesSet) Err() error {
 	return c.p.Err()
 }
 
-func (c *compactionSeriesSet) At() (labels.Tsid, []chunks.Meta, Intervals) {
-	return c.tsid, c.c, c.intervals
+func (c *compactionSeriesSet) At() (labels.Tsid, labels.Labels, []chunks.Meta, Intervals) {
+	return c.tsid, nil, c.c, c.intervals
 }
 
 type compactionMerger struct {
@@ -933,8 +934,8 @@ func (c *compactionMerger) compare() int {
 	if !c.bok {
 		return -1
 	}
-	a, _, _ := c.a.At()
-	b, _, _ := c.b.At()
+	a, _,  _, _ := c.a.At()
+	b, _, _, _ := c.b.At()
 	return int(int64(a) - int64(b))
 }
 
@@ -949,21 +950,21 @@ func (c *compactionMerger) Next() bool {
 
 	d := c.compare()
 	if d > 0 {
-		tsid, chks, c.intervals = c.b.At()
+		tsid, _, chks, c.intervals = c.b.At()
 		c.tsid = tsid
 		c.c = append(c.c[:0], chks...)
 
 		c.bok = c.b.Next()
 	} else if d < 0 {
-		tsid, chks, c.intervals = c.a.At()
+		tsid, _, chks, c.intervals = c.a.At()
 		c.tsid = tsid
 		c.c = append(c.c[:0], chks...)
 
 		c.aok = c.a.Next()
 	} else {
 		// Both sets contain the current series. Chain them into a single one.
-		id, ca, ra := c.a.At()
-		_, cb, rb := c.b.At()
+		id, _, ca, ra := c.a.At()
+		_, _, cb, rb := c.b.At()
 
 		for _, r := range rb {
 			ra = ra.add(r)
@@ -987,6 +988,6 @@ func (c *compactionMerger) Err() error {
 	return c.b.Err()
 }
 
-func (c *compactionMerger) At() (labels.Tsid, []chunks.Meta, Intervals) {
-	return c.tsid, c.c, c.intervals
+func (c *compactionMerger) At() (labels.Tsid, labels.Labels, []chunks.Meta, Intervals) {
+	return c.tsid, nil, c.c, c.intervals
 }

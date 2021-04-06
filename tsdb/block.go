@@ -57,7 +57,7 @@ type IndexReader interface {
 	// Series populates the given labels and chunk metas for the series identified
 	// by the reference.
 	// Returns ErrNotFound if the ref does not resolve to a known series.
-	Series(tsid labels.Tsid, chks *[]chunks.Meta) error
+	Series(tsid labels.Tsid, lbls *labels.Labels, chks *[]chunks.Meta) error
 
 	// Close releases the underlying resources of the reader.
 	Close() error
@@ -402,8 +402,8 @@ func (r blockIndexReader) AllPostings() (index.Postings, error) {
 	return postings, nil
 }
 
-func (r blockIndexReader) Series(tsid labels.Tsid, chks *[]chunks.Meta) error {
-	if err := r.ir.Series(tsid, chks); err != nil {
+func (r blockIndexReader) Series(tsid labels.Tsid, lbls *labels.Labels, chks *[]chunks.Meta) error {
+	if err := r.ir.Series(tsid, lbls, chks); err != nil {
 		return errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
 	}
 	return nil
@@ -449,20 +449,21 @@ func (pb *Block) Delete(mint, maxt int64, tsid labels.Tsid) error {
 	stones := newMemTombstones()
 
 	var chks []chunks.Meta
+	var lset labels.Labels
 
-		err := ir.Series(tsid, &chks)
-		if err != nil {
-			return err
-		}
+	err := ir.Series(tsid, &lset, &chks)
+	if err != nil {
+		return err
+	}
 
-		for _, chk := range chks {
-			if chk.OverlapsClosedInterval(mint, maxt) {
-				// Delete only until the current values and not beyond.
-				tmin, tmax := clampInterval(mint, maxt, chks[0].MinTime, chks[len(chks)-1].MaxTime)
-				stones.addInterval(tsid, Interval{tmin, tmax})
-				break
-			}
+	for _, chk := range chks {
+		if chk.OverlapsClosedInterval(mint, maxt) {
+			// Delete only until the current values and not beyond.
+			tmin, tmax := clampInterval(mint, maxt, chks[0].MinTime, chks[len(chks)-1].MaxTime)
+			stones.addInterval(tsid, Interval{tmin, tmax})
+			break
 		}
+	}
 
 	err = pb.tombstones.Iter(func(id labels.Tsid, ivs Intervals) error {
 		for _, iv := range ivs {

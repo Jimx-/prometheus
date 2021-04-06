@@ -544,7 +544,8 @@ func (emptyStringTuples) At(i int) ([]string, error) { return nil, nil }
 func (emptyStringTuples) Len() int                   { return 0 }
 
 // Series reads the series with the given ID and writes its labels and chunks into lbls and chks.
-func (r *Reader) Series(id labels.Tsid, chks *[]chunks.Meta) error {
+func (r *Reader) Series(id labels.Tsid, lbls *labels.Labels, chks *[]chunks.Meta) error {
+	*lbls = nil
 	offset := r.offsetTable[uint64(id)]
 	if r.version == FormatV3 {
 		offset = offset * 16

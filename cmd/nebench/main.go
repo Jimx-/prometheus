@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+	// "runtime/pprof"
 
 	"github.com/pkg/errors"
 	"github.com/oklog/run"
@@ -175,6 +176,7 @@ func main() {
 	var g run.Group
 	{
 		cancel := make(chan struct{})
+		profile := make(chan struct{})
 
 		g.Add(func() error {
 			for t := 0; t < 2160; t++ {
@@ -196,6 +198,10 @@ func main() {
 
 				if err := app.Commit(); err != nil {
 					return err
+				}
+
+				if t == 1 {
+					close(profile)
 				}
 			}
 			return nil
@@ -264,6 +270,54 @@ func main() {
 		},
 			func(err error) {
 			})
+
+		// g.Add(func() error {
+		//	f, _ := os.Create("/tmp/cpu.prof")
+		//	defer f.Close()
+
+		//	<-profile
+
+		//	if err := pprof.StartCPUProfile(f); err != nil {
+		//		os.Exit(2)
+		//	}
+		//	defer pprof.StopCPUProfile()
+
+		//	for i := 0; i < 500; i++ {
+		//		now := time.Now()
+		//		then := now.Add(time.Duration(-5) * time.Minute)
+
+		//		q, _ := db.Querier(then.UnixNano() / int64(time.Millisecond), now.UnixNano() / int64(time.Millisecond))
+
+		//		{
+		//			count := 0
+		//			ss, _ := q.Select(labels.NewEqualMatcher("__name__", "node_cpu_seconds_total"))
+		//			for ss.Next() {
+		//				ss.At().Labels()
+		//				count += 1
+		//			}
+		//		}
+		//		{
+		//			count := 0
+		//			ss, _ := q.Select(labels.NewEqualMatcher("__name__", "node_memory_MemAvailable_bytes"))
+		//			for ss.Next() {
+		//				ss.At().Labels()
+		//				count += 1
+		//			}
+		//		}
+		//		{
+		//			count := 0
+		//			ss, _ := q.Select(labels.NewEqualMatcher("__name__", "node_network_transmit_bytes_total"))
+		//			for ss.Next() {
+		//				ss.At().Labels()
+		//				count += 1
+		//			}
+		//		}
+		//	}
+
+		//	return nil
+		// },
+		//	func(err error) {
+		//	})
 	}
 
 	if err := g.Run(); err != nil {

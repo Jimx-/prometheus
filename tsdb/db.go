@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -28,7 +29,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"path"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -122,7 +122,7 @@ type RawAppender interface {
 	// to AddFast() at any point. Adding the sample via Add() returns a new
 	// reference number.
 	// If the reference is 0 it must not be used for caching.
-	Add(id labels.Tsid, t int64, v float64) (uint64, error)
+	Add(id labels.Tsid, l labels.Labels, t int64, v float64) (uint64, error)
 
 	// AddFast adds a sample pair for the referenced series. It is generally
 	// faster than adding a sample by providing its full label set.
@@ -621,7 +621,7 @@ func (a dbAppender) Add(l labels.Labels, t int64, v float64) (uint64, error) {
 		a.batch.Add(p.GetFirst())
 	}
 
-	return a.app.Add(labels.Tsid(p.GetFirst().Raw_tsid()), t, v)
+	return a.app.Add(labels.Tsid(p.GetFirst().Raw_tsid()), l, t, v)
 }
 
 func (a dbAppender) AddFast(ref uint64, t int64, v float64) error {
@@ -1410,6 +1410,13 @@ type dbSeries struct {
 }
 
 func (s *dbSeries) Labels() labels.Labels {
+	// return labels.Labels{}
+	lbls := s.RawSeries.Labels()
+
+	if lbls != nil {
+		return lbls
+	}
+
 	return tagtreego.GetSeriesLabels(s.index, uint64(s.RawSeries.Tsid()))
 }
 

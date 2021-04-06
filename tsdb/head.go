@@ -385,7 +385,7 @@ func (h *Head) loadWAL(r *wal.Reader, multiRef map[uint64]uint64) (err error) {
 				}
 			}
 			for _, s := range series {
-				series, created := h.getOrCreateWithID(labels.Tsid(s.Ref))
+				series, created := h.getOrCreateWithID(labels.Tsid(s.Ref), nil)
 
 				if !created {
 					// There's already a different ref for this series.
@@ -726,14 +726,14 @@ type initAppender struct {
 	head *Head
 }
 
-func (a *initAppender) Add(id labels.Tsid, t int64, v float64) (uint64, error) {
+func (a *initAppender) Add(id labels.Tsid, l labels.Labels, t int64, v float64) (uint64, error) {
 	if a.app != nil {
-		return a.app.Add(id, t, v)
+		return a.app.Add(id, l, t, v)
 	}
 	a.head.initTime(t)
 	a.app = a.head.appender()
 
-	return a.app.Add(id, t, v)
+	return a.app.Add(id, l, t, v)
 }
 
 func (a *initAppender) AddFast(ref uint64, t int64, v float64) error {
@@ -823,12 +823,12 @@ type headAppender struct {
 	samples []RefSample
 }
 
-func (a *headAppender) Add(tsid labels.Tsid, t int64, v float64) (uint64, error) {
+func (a *headAppender) Add(tsid labels.Tsid, l labels.Labels, t int64, v float64) (uint64, error) {
 	if t < a.minValidTime {
 		return 0, ErrOutOfBounds
 	}
 
-	s, created := a.head.getOrCreate(tsid)
+	s, created := a.head.getOrCreate(tsid, l)
 	if created {
 		a.series = append(a.series, RefSeries{
 			Ref:    s.ref,
@@ -1210,13 +1210,14 @@ func (h *headIndexReader) AllPostings() (index.Postings, error) {
 }
 
 // Series returns the series for the given reference.
-func (h *headIndexReader) Series(tsid labels.Tsid, chks *[]chunks.Meta) error {
+func (h *headIndexReader) Series(tsid labels.Tsid, lbls *labels.Labels, chks *[]chunks.Meta) error {
 	s := h.head.series.getByID(uint64(tsid))
 
 	if s == nil {
 		h.head.metrics.seriesNotFound.Inc()
 		return ErrNotFound
 	}
+	*lbls = append((*lbls)[:0], s.lset...)
 
 	s.Lock()
 	defer s.Unlock()
@@ -1244,7 +1245,7 @@ func (h *headIndexReader) Series(tsid labels.Tsid, chks *[]chunks.Meta) error {
 	return nil
 }
 
-func (h *Head) getOrCreate(tsid labels.Tsid) (*memSeries, bool) {
+func (h *Head) getOrCreate(tsid labels.Tsid, l labels.Labels) (*memSeries, bool) {
 	// Just using `getOrSet` below would be semantically sufficient, but we'd create
 	// a new series on every sample inserted via Add(), which causes allocations
 	// and makes our series IDs rather random and harder to compress in postings.
@@ -1253,11 +1254,11 @@ func (h *Head) getOrCreate(tsid labels.Tsid) (*memSeries, bool) {
 		return s, false
 	}
 
-	return h.getOrCreateWithID(tsid)
+	return h.getOrCreateWithID(tsid, l)
 }
 
-func (h *Head) getOrCreateWithID(tsid labels.Tsid) (*memSeries, bool) {
-	s := newMemSeries(tsid, h.chunkRange)
+func (h *Head) getOrCreateWithID(tsid labels.Tsid, l labels.Labels) (*memSeries, bool) {
+	s := newMemSeries(tsid, l, h.chunkRange)
 
 	s, created := h.series.getOrSet(tsid, s)
 	if !created {
@@ -1446,6 +1447,7 @@ type memSeries struct {
 	sync.Mutex
 
 	ref          uint64
+	lset labels.Labels
 	chunks       []*memChunk
 	headChunk    *memChunk
 	chunkRange   int64
@@ -1458,9 +1460,10 @@ type memSeries struct {
 	app chunkenc.Appender // Current appender for the chunk.
 }
 
-func newMemSeries(tsid labels.Tsid, chunkRange int64) *memSeries {
+func newMemSeries(tsid labels.Tsid, l labels.Labels, chunkRange int64) *memSeries {
 	s := &memSeries{
 		ref:        uint64(tsid),
+		lset: l,
 		chunkRange: chunkRange,
 		nextAt:     math.MinInt64,
 	}

@@ -52,6 +52,7 @@ type RawQuerier interface {
 
 type RawSeries interface {
 	Tsid() labels.Tsid
+	Labels() labels.Labels
 	Iterator() SeriesIterator
 }
 
@@ -362,7 +363,7 @@ func (s *mergedVerticalRawSeriesSet) Next() bool {
 // actual series itself.
 type ChunkSeriesSet interface {
 	Next() bool
-	At() (labels.Tsid, []chunks.Meta, Intervals)
+	At() (labels.Tsid, labels.Labels, []chunks.Meta, Intervals)
 	Err() error
 }
 
@@ -374,6 +375,7 @@ type baseChunkSeries struct {
 	tombstones TombstoneReader
 
 	tsid      labels.Tsid
+	lset labels.Labels
 	chks      []chunks.Meta
 	intervals Intervals
 	err       error
@@ -397,8 +399,8 @@ func LookupChunkSeries(ir IndexReader, tr TombstoneReader, tsids ...labels.Tsid)
 	}, nil
 }
 
-func (s *baseChunkSeries) At() (labels.Tsid, []chunks.Meta, Intervals) {
-	return s.tsid, s.chks, s.intervals
+func (s *baseChunkSeries) At() (labels.Tsid, labels.Labels, []chunks.Meta, Intervals) {
+	return s.tsid, s.lset, s.chks, s.intervals
 }
 
 func (s *baseChunkSeries) Err() error { return s.err }
@@ -406,12 +408,13 @@ func (s *baseChunkSeries) Err() error { return s.err }
 func (s *baseChunkSeries) Next() bool {
 	var (
 		chkMetas = make([]chunks.Meta, len(s.chks))
+		lbls labels.Labels
 		err      error
 	)
 
 	for s.p.Next() {
 		ref := labels.Tsid(s.p.At())
-		if err := s.index.Series(ref, &chkMetas); err != nil {
+		if err := s.index.Series(ref, &lbls, &chkMetas); err != nil {
 			// Postings may be stale. Skip if no underlying series exists.
 			if errors.Cause(err) == ErrNotFound {
 				continue
@@ -421,6 +424,7 @@ func (s *baseChunkSeries) Next() bool {
 		}
 
 		s.tsid = ref
+		s.lset = lbls
 		s.chks = chkMetas
 		s.intervals, err = s.tombstones.Get(labels.Tsid(s.p.At()))
 		if err != nil {
@@ -459,18 +463,19 @@ type populatedChunkSeries struct {
 	err       error
 	chks      []chunks.Meta
 	tsid labels.Tsid
+	lset labels.Labels
 	intervals Intervals
 }
 
-func (s *populatedChunkSeries) At() (labels.Tsid, []chunks.Meta, Intervals) {
-	return s.tsid, s.chks, s.intervals
+func (s *populatedChunkSeries) At() (labels.Tsid, labels.Labels, []chunks.Meta, Intervals) {
+	return s.tsid, s.lset, s.chks, s.intervals
 }
 
 func (s *populatedChunkSeries) Err() error { return s.err }
 
 func (s *populatedChunkSeries) Next() bool {
 	for s.set.Next() {
-		tsid, chks, dranges := s.set.At()
+		tsid, lbls, chks, dranges := s.set.At()
 
 		for len(chks) > 0 {
 			if chks[0].MaxTime >= s.mint {
@@ -507,6 +512,7 @@ func (s *populatedChunkSeries) Next() bool {
 		}
 
 		s.tsid = tsid
+		s.lset = lbls
 		s.chks = chks
 		s.intervals = dranges
 
@@ -529,9 +535,10 @@ type blockRawSeriesSet struct {
 
 func (s *blockRawSeriesSet) Next() bool {
 	for s.set.Next() {
-		tsid, chunks, dranges := s.set.At()
+		tsid, lset, chunks, dranges := s.set.At()
 		s.cur = &chunkRawSeries{
 			tsid: tsid,
+			lset: lset,
 			chunks: chunks,
 			mint:   s.mint,
 			maxt:   s.maxt,
@@ -553,6 +560,7 @@ func (s *blockRawSeriesSet) Err() error { return s.err }
 // time series data.
 type chunkRawSeries struct {
 	tsid labels.Tsid
+	lset labels.Labels
 	chunks []chunks.Meta // in-order chunk refs
 
 	mint, maxt int64
@@ -562,6 +570,10 @@ type chunkRawSeries struct {
 
 func (s *chunkRawSeries) Tsid() labels.Tsid {
 	return s.tsid
+}
+
+func (s *chunkRawSeries) Labels() labels.Labels {
+	return s.lset
 }
 
 func (s *chunkRawSeries) Iterator() SeriesIterator {
@@ -590,6 +602,10 @@ type chainedRawSeries struct {
 
 func (s *chainedRawSeries) Tsid() labels.Tsid {
 	return s.series[0].Tsid()
+}
+
+func (s *chainedRawSeries) Labels() labels.Labels {
+	return s.series[0].Labels()
 }
 
 func (s *chainedRawSeries) Iterator() SeriesIterator {
@@ -661,6 +677,10 @@ type verticalChainedRawSeries struct {
 
 func (s *verticalChainedRawSeries) Tsid() labels.Tsid {
 	return s.series[0].Tsid()
+}
+
+func (s *verticalChainedRawSeries) Labels() labels.Labels {
+	return s.series[0].Labels()
 }
 
 func (s *verticalChainedRawSeries) Iterator() SeriesIterator {
