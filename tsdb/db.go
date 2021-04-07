@@ -691,6 +691,8 @@ func (db *DB) compact() (err error) {
 			// from the block interval here.
 			maxt: maxt - 1,
 		}
+		db.index.ManualCompact()
+
 		uid, err := db.compactor.Write(db.dir, head, mint, maxt, nil)
 		if err != nil {
 			return errors.Wrap(err, "persist head block")

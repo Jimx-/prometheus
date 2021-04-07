@@ -1064,40 +1064,41 @@ loop:
 		if sl.cache.getDropped(yoloString(met)) {
 			continue
 		}
-		ce, ok := sl.cache.get(yoloString(met))
-		if ok {
-			switch err = app.AddFast(ce.lset, ce.ref, t, v); err {
-			case nil:
-				if tp == nil {
-					sl.cache.trackStaleness(ce.hash, ce.lset)
-				}
-			case storage.ErrNotFound:
-				ok = false
-			case storage.ErrOutOfOrderSample:
-				numOutOfOrder++
-				level.Debug(sl.l).Log("msg", "Out of order sample", "series", string(met))
-				targetScrapeSampleOutOfOrder.Inc()
-				continue
-			case storage.ErrDuplicateSampleForTimestamp:
-				numDuplicates++
-				level.Debug(sl.l).Log("msg", "Duplicate sample for timestamp", "series", string(met))
-				targetScrapeSampleDuplicate.Inc()
-				continue
-			case storage.ErrOutOfBounds:
-				numOutOfBounds++
-				level.Debug(sl.l).Log("msg", "Out of bounds metric", "series", string(met))
-				targetScrapeSampleOutOfBounds.Inc()
-				continue
-			case errSampleLimit:
-				// Keep on parsing output if we hit the limit, so we report the correct
-				// total number of samples scraped.
-				sampleLimitErr = err
-				added++
-				continue
-			default:
-				break loop
-			}
-		}
+		ok := false
+		// ce, ok := sl.cache.get(yoloString(met))
+		// if ok {
+		//	switch err = app.AddFast(ce.lset, ce.ref, t, v); err {
+		//	case nil:
+		//		if tp == nil {
+		//			sl.cache.trackStaleness(ce.hash, ce.lset)
+		//		}
+		//	case storage.ErrNotFound:
+		//		ok = false
+		//	case storage.ErrOutOfOrderSample:
+		//		numOutOfOrder++
+		//		level.Debug(sl.l).Log("msg", "Out of order sample", "series", string(met))
+		//		targetScrapeSampleOutOfOrder.Inc()
+		//		continue
+		//	case storage.ErrDuplicateSampleForTimestamp:
+		//		numDuplicates++
+		//		level.Debug(sl.l).Log("msg", "Duplicate sample for timestamp", "series", string(met))
+		//		targetScrapeSampleDuplicate.Inc()
+		//		continue
+		//	case storage.ErrOutOfBounds:
+		//		numOutOfBounds++
+		//		level.Debug(sl.l).Log("msg", "Out of bounds metric", "series", string(met))
+		//		targetScrapeSampleOutOfBounds.Inc()
+		//		continue
+		//	case errSampleLimit:
+		//		// Keep on parsing output if we hit the limit, so we report the correct
+		//		// total number of samples scraped.
+		//		sampleLimitErr = err
+		//		added++
+		//		continue
+		//	default:
+		//		break loop
+		//	}
+		// }
 		if !ok {
 			var lset labels.Labels
 
@@ -1275,22 +1276,22 @@ func (sl *scrapeLoop) reportStale(start time.Time) error {
 }
 
 func (sl *scrapeLoop) addReportSample(app storage.Appender, s string, t int64, v float64) error {
-	ce, ok := sl.cache.get(s)
-	if ok {
-		err := app.AddFast(ce.lset, ce.ref, t, v)
-		switch err {
-		case nil:
-			return nil
-		case storage.ErrNotFound:
-			// Try an Add.
-		case storage.ErrOutOfOrderSample, storage.ErrDuplicateSampleForTimestamp:
-			// Do not log here, as this is expected if a target goes away and comes back
-			// again with a new scrape loop.
-			return nil
-		default:
-			return err
-		}
-	}
+	// ce, ok := sl.cache.get(s)
+	// if ok {
+	//	err := app.AddFast(ce.lset, ce.ref, t, v)
+	//	switch err {
+	//	case nil:
+	//		return nil
+	//	case storage.ErrNotFound:
+	//		// Try an Add.
+	//	case storage.ErrOutOfOrderSample, storage.ErrDuplicateSampleForTimestamp:
+	//		// Do not log here, as this is expected if a target goes away and comes back
+	//		// again with a new scrape loop.
+	//		return nil
+	//	default:
+	//		return err
+	//	}
+	// }
 	lset := labels.Labels{
 		// The constants are suffixed with the invalid \xff unicode rune to avoid collisions
 		// with scraped metrics in the cache.

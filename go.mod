@@ -10,7 +10,7 @@ require (
 	github.com/Azure/azure-sdk-for-go v23.2.0+incompatible
 	github.com/Azure/go-autorest v11.2.8+incompatible
 	github.com/OneOfOne/xxhash v1.2.5 // indirect
-	github.com/RoaringBitmap/roaring v0.5.5 // indirect
+	github.com/RoaringBitmap/roaring v0.5.5
 	github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751 // indirect
 	github.com/alecthomas/units v0.0.0-20190717042225-c3de453c63f4
 	github.com/armon/go-metrics v0.0.0-20190430140413-ec5e00d3c878 // indirect

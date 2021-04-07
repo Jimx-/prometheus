@@ -58,6 +58,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/storage/tsdb"
+	"github.com/prometheus/prometheus/tsdb/labels"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/web"
 )
@@ -731,6 +732,75 @@ func main() {
 				notifierManager.Stop()
 			},
 		)
+	}
+	{
+		cancel := make(chan struct{})
+
+		g.Add(func() error {
+			<-dbOpen
+			db := localStorage.Get()
+			<-time.After(3 * time.Second)
+
+			f, _ := os.Create("/tmp/prometheus.csv")
+			defer f.Close()
+
+			f.WriteString("timestamp,cpu,cpu_count,mem,mem_count,transmit,transmit_count\n")
+			for {
+				select {
+				case <-cancel:
+					return nil
+				case <-time.After(10 * time.Second):
+					break
+				}
+
+				now := time.Now()
+				then := now.Add(time.Duration(-5) * time.Minute)
+
+				q, _ := db.Querier(then.UnixNano() / int64(time.Millisecond), now.UnixNano() / int64(time.Millisecond))
+
+				f.WriteString(fmt.Sprintf("%d", now.UnixNano() / int64(time.Millisecond)))
+				{
+					t1 := time.Now()
+					count := 0
+					ss, _ := q.Select(labels.NewEqualMatcher("__name__", "node_cpu_seconds_total"))
+					for ss.Next() {
+						ss.At().Labels()
+						count += 1
+					}
+					t2:= time.Now()
+					f.WriteString(fmt.Sprintf(",%d,%d", t2.Sub(t1).Microseconds(), count))
+				}
+				{
+					t1 := time.Now()
+					count := 0
+					ss, _ := q.Select(labels.NewEqualMatcher("__name__", "node_memory_MemAvailable_bytes"))
+					for ss.Next() {
+						ss.At().Labels()
+						count += 1
+					}
+					t2:= time.Now()
+					f.WriteString(fmt.Sprintf(",%d,%d", t2.Sub(t1).Microseconds(), count))
+				}
+				{
+					t1 := time.Now()
+					count := 0
+					ss, _ := q.Select(labels.NewEqualMatcher("__name__", "node_network_transmit_bytes_total"))
+					for ss.Next() {
+						ss.At().Labels()
+						count += 1
+					}
+					t2:= time.Now()
+					f.WriteString(fmt.Sprintf(",%d,%d", t2.Sub(t1).Microseconds(), count))
+				}
+
+				f.WriteString("\n")
+			}
+
+			return nil
+		},
+			func(err error) {
+				close(cancel)
+			})
 	}
 	if err := g.Run(); err != nil {
 		level.Error(logger).Log("err", err)
